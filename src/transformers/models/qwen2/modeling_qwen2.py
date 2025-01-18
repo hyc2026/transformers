@@ -25,6 +25,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
+from torch.autograd import Variable
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from ...activations import ACT2FN
@@ -787,14 +788,17 @@ class Qwen2Model(Qwen2PreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+
+        config._attn_implementation = "flash_attention_2"
+        self.gradient_checkpointing = False
+        self._attn_implementation = config._attn_implementation
         self.layers = nn.ModuleList(
             [Qwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self._attn_implementation = config._attn_implementation
+        
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Qwen2RotaryEmbedding(config=config)
 
-        self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -831,9 +835,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         if self.gradient_checkpointing and self.training:
             if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
+                # logger.warning_once(
+                #     "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+                # )
                 use_cache = False
 
         # kept for BC (non `Cache` `past_key_values` inputs)
@@ -852,6 +856,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+        # input_ids = Variable(inputs_embeds, requires_grad=True)
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -880,6 +885,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
+                self.gradient_checkpointing_enable()
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
@@ -1215,7 +1221,13 @@ class Qwen2ForSequenceClassification(Qwen2PreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.model = Qwen2Model(config)
-        self.score = nn.Linear(config.hidden_size, self.num_labels, bias=False)
+        # self.score = nn.Linear(config.hidden_size, self.num_labels, bias=False)
+        self.score = nn.Sequential(
+            # nn.Softmax(dim=-1),
+            nn.Linear(config.hidden_size, 384, bias=False),
+            nn.Linear(384, self.num_labels, bias=False)
+            # nn.Linear(config.hidden_size, self.num_labels, bias=False),
+        )
 
         # Initialize weights and apply final processing
         self.post_init()
